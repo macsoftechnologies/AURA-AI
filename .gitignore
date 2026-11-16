@@ -1,0 +1,26 @@
+# Python / FastAPI / Alembic
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# Node / React / TypeScript
+node_modules/
+dist/
+build/
+.vite/
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
