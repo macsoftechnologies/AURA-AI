@@ -826,7 +826,7 @@ function Welcome() {
                     ease: EASE_OUT_EXPO,
                   }}
                 >
-                  Meet <span className="aura-gradient-shimmer">AURA.</span>
+                  Meet <span className="aura-gradient-shimmer">AURA</span>
                 </motion.div>
               </div>
               <div style={{ overflow: "hidden" }}>
@@ -852,7 +852,7 @@ function Welcome() {
                     ease: EASE_OUT_EXPO,
                   }}
                 >
-                  AI Assistant.
+                  AI Assistant
                 </motion.div>
               </div>
             </h1>

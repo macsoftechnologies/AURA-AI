@@ -4,8 +4,8 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from app.schemas.chat import ChatRequest, ChatResponse
-from app.services.llm.groq_service import generate_response
-from app.core.config import GROQ_MODEL
+from app.services.llm.sarvam_service import generate_response
+from app.core.config import SARVAM_LLM_MODEL
 
 
 router = APIRouter(prefix="/api", tags=["Chat"])
@@ -24,13 +24,13 @@ async def chat(request: ChatRequest):
 
         return ChatResponse(
             response=answer,
-            model=GROQ_MODEL
+            model=SARVAM_LLM_MODEL
         )
 
-    except Exception:
-        logger.exception("Groq chat request failed")
+    except Exception as exc:
+        logger.exception("Sarvam chat request failed")
 
         raise HTTPException(
             status_code=502,
-            detail="AURA could not generate a response. Please try again."
+            detail=f"AURA could not generate a response. ({str(exc)})"
         )

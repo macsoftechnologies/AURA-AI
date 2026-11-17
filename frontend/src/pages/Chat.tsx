@@ -25,6 +25,19 @@ const MAX_QUESTIONS = 15;
 const SILENCE_DELAY = 5000;
 const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
+export const SUPPORTED_LANGUAGES = [
+  { code: "te-IN", label: "తెలుగు (Telugu)", flag: "🇮🇳" },
+  { code: "hi-IN", label: "हिन्दी (Hindi)", flag: "🇮🇳" },
+  { code: "en-IN", label: "English (IN)", flag: "🇮🇳" },
+  { code: "bn-IN", label: "বাংলা (Bengali)", flag: "🇮🇳" },
+  { code: "ta-IN", label: "தமிழ் (Tamil)", flag: "🇮🇳" },
+  { code: "mr-IN", label: "मराठी (Marathi)", flag: "🇮🇳" },
+  { code: "gu-IN", label: "ગુજરાતી (Gujarati)", flag: "🇮🇳" },
+  { code: "kn-IN", label: "ಕನ್ನಡ (Kannada)", flag: "🇮🇳" },
+  { code: "ml-IN", label: "മലയാളം (Malayalam)", flag: "🇮🇳" },
+  { code: "pa-IN", label: "ਪੰਜਾਬੀ (Punjabi)", flag: "🇮🇳" },
+];
+
 type Message = {
   role: "user" | "assistant";
   content: string;
@@ -174,10 +187,10 @@ function Chat() {
 
   const [error, setError] = useState("");
   const [speechError, setSpeechError] = useState("");
-
+  const recognitionRef = useRef<any>(null);
   const [isVoiceEnabled, setIsVoiceEnabled] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
-
+  const [selectedLang, setSelectedLang] = useState(SUPPORTED_LANGUAGES[0]);
   const [questionCount, setQuestionCount] = useState(0);
   const [showConversationEndedModal, setShowConversationEndedModal] =
     useState(false);
@@ -257,6 +270,7 @@ function Chat() {
 
       silenceTimerRef.current = null;
       stopListening();
+
 
       transcriptRef.current = "";
       interimTranscriptRef.current = "";
@@ -357,7 +371,10 @@ function Chat() {
       const response = await fetch(`${API_URL}/api/tts/speak`, {
         method: "POST",
         headers: getAuthHeaders(true),
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({
+          text,
+          language_code: selectedLang.code,
+        }),
       });
 
       if (response.status === 401) {
@@ -586,6 +603,58 @@ function Chat() {
 
       streamRef.current = stream;
 
+      // Real-time live speech recognition while speaking
+      const SpeechRecognitionClass =
+        (window as unknown as { SpeechRecognition?: any }).SpeechRecognition ||
+        (window as unknown as { webkitSpeechRecognition?: any }).webkitSpeechRecognition;
+
+      if (SpeechRecognitionClass) {
+        try {
+          const recognition = new SpeechRecognitionClass();
+          recognition.continuous = true;
+          recognition.interimResults = true;
+          recognition.lang = selectedLang.code;
+
+          recognition.onresult = (event: any) => {
+            let currentInterim = "";
+            let currentFinal = "";
+
+            for (let i = event.resultIndex; i < event.results.length; ++i) {
+              const text = event.results[i][0].transcript;
+              if (event.results[i].isFinal) {
+                currentFinal += text;
+              } else {
+                currentInterim += text;
+              }
+            }
+
+            if (currentFinal) {
+              transcriptRef.current = [transcriptRef.current, currentFinal.trim()]
+                .filter(Boolean)
+                .join(" ");
+              setTranscript(transcriptRef.current);
+              setInterimTranscript("");
+            }
+
+            if (currentInterim) {
+              interimTranscriptRef.current = currentInterim.trim();
+              setInterimTranscript(currentInterim.trim());
+            }
+
+            scheduleSilenceDetection();
+          };
+
+          recognition.onerror = (e: any) => {
+            console.warn("SpeechRecognition error:", e);
+          };
+
+          recognition.start();
+          recognitionRef.current = recognition;
+        } catch (e) {
+          console.warn("SpeechRecognition initialization failed:", e);
+        }
+      }
+
       let mimeType = "";
 
       if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
@@ -596,7 +665,7 @@ function Chat() {
 
       const wsBase = API_URL.replace(/^http/, "ws");
       const socket = new WebSocket(
-        `${wsBase}/ws/stt?token=${encodeURIComponent(token)}`,
+        `${wsBase}/ws/stt?token=${encodeURIComponent(token)}&lang=${encodeURIComponent(selectedLang.code)}`,
       );
 
       socket.binaryType = "arraybuffer";
@@ -692,6 +761,13 @@ function Chat() {
 
   function stopListening() {
     clearSilenceTimer();
+
+    try {
+      recognitionRef.current?.stop();
+      recognitionRef.current = null;
+    } catch {
+      // already stopped
+    }
 
     const recorder = recorderRef.current;
 
@@ -1825,11 +1901,43 @@ function Chat() {
           </div>
 
           <div className="aura-top-right">
+            {/* Language Selector */}
+            <select
+              value={selectedLang.code}
+              onChange={(e) => {
+                const found = SUPPORTED_LANGUAGES.find(
+                  (l) => l.code === e.target.value
+                );
+                if (found) setSelectedLang(found);
+              }}
+              style={{
+                background: "rgba(255, 255, 255, 0.85)",
+                border: "1px solid rgba(203, 213, 225, 0.8)",
+                color: "#1e293b",
+                borderRadius: "10px",
+                padding: "6px 12px",
+                fontSize: "13px",
+                fontWeight: 500,
+                cursor: "pointer",
+                outline: "none",
+                boxShadow: "0 1px 3px rgba(0, 0, 0, 0.05)",
+              }}
+            >
+              {SUPPORTED_LANGUAGES.map((lang) => (
+                <option
+                  key={lang.code}
+                  value={lang.code}
+                  style={{ background: "#ffffff", color: "#1e293b" }}
+                >
+                  {lang.flag} {lang.label}
+                </option>
+              ))}
+            </select>
+
             <div className="aura-status">
               <span
-                className={`aura-status-dot ${
-                  isListening || isSpeaking ? "active" : ""
-                }`}
+                className={`aura-status-dot ${isListening || isSpeaking ? "active" : ""
+                  }`}
               />
               {statusText}
             </div>
@@ -1860,9 +1968,8 @@ function Chat() {
                 <div className="aura-orb-ring-inner" />
 
                 <div
-                  className={`aura-orb ${
-                    isListening ? "listening" : isSpeaking ? "speaking" : ""
-                  }`}
+                  className={`aura-orb ${isListening ? "listening" : isSpeaking ? "speaking" : ""
+                    }`}
                 >
                   <VoiceVisualizer
                     stream={streamRef.current}
@@ -1879,12 +1986,12 @@ function Chat() {
 
               <h1 className="aura-welcome-title">
                 {isListening
-                  ? "I'm listening."
+                  ? transcript || interimTranscript || "I'm listening..."
                   : isSpeaking
                     ? "I'm speaking."
                     : loading
                       ? "Thinking..."
-                      : "Hello, I'm AURA."}
+                      : "Hello, I'm AURA"}
               </h1>
 
               <p className="aura-welcome-description">
@@ -2147,3 +2254,4 @@ function Chat() {
 }
 
 export default Chat;
+
