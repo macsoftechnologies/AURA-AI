@@ -1,6 +1,6 @@
-
 from app.database.connection import Base, engine
 from app.models.user import User
+from app.models.rag import UserDocument, DocumentChunk
 
 
 def create_tables():

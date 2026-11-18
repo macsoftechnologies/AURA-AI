@@ -188,6 +188,9 @@ function Chat() {
   const [error, setError] = useState("");
   const [speechError, setSpeechError] = useState("");
   const recognitionRef = useRef<any>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [activeDoc, setActiveDoc] = useState<{ id: number; filename: string; chunks: number } | null>(null);
+  const [isUploadingDoc, setIsUploadingDoc] = useState(false);
   const [isVoiceEnabled, setIsVoiceEnabled] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [selectedLang, setSelectedLang] = useState(SUPPORTED_LANGUAGES[0]);
@@ -228,6 +231,47 @@ function Chat() {
     }
 
     return headers;
+  }
+
+  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) return;
+
+    setIsUploadingDoc(true);
+    setError("");
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const res = await fetch(`${API_URL}/api/rag/upload`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.detail || "Upload failed");
+      }
+
+      const data = await res.json();
+      setActiveDoc({
+        id: data.document_id,
+        filename: file.name,
+        chunks: data.chunks_indexed,
+      });
+    } catch (err: any) {
+      setError(err.message || "Failed to process document");
+    } finally {
+      setIsUploadingDoc(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
   }
 
   function handleLogout() {
@@ -457,6 +501,38 @@ function Chat() {
     }
   }
 
+  async function playAudioBase64(base64Audio: string) {
+    try {
+      const context = await unlockAudio();
+      stopSpeech();
+
+      const binary = atob(base64Audio);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+
+      const audioBuffer = await context.decodeAudioData(bytes.buffer.slice(0));
+      const source = context.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(context.destination);
+
+      audioSourceRef.current = source;
+      source.onended = () => {
+        if (audioSourceRef.current === source) {
+          audioSourceRef.current = null;
+          setIsSpeaking(false);
+        }
+      };
+
+      source.start(0);
+      setIsSpeaking(true);
+    } catch (err) {
+      console.error("Audio playback error:", err);
+      setIsSpeaking(false);
+    }
+  }
+
   function toggleVoice() {
     const nextValue = !voiceEnabledRef.current;
 
@@ -515,29 +591,69 @@ function Chat() {
     setLoading(true);
 
     try {
-      const response = await fetch(`${API_URL}/api/chat`, {
-        method: "POST",
-        headers: getAuthHeaders(true),
-        body: JSON.stringify({
-          message: text,
-          history: conversationHistory,
-        }),
-      });
+      let assistantResponse = "";
 
-      if (response.status === 401) {
-        handleLogout();
-        return;
+      if (activeDoc) {
+        // Grounded Multilingual Hybrid RAG Query
+        const response = await fetch(`${API_URL}/api/rag/query`, {
+          method: "POST",
+          headers: getAuthHeaders(true),
+          body: JSON.stringify({
+            query: text,
+            document_id: activeDoc.id,
+            language_code: selectedLang.code,
+            with_voice: true,
+          }),
+        });
+
+        if (response.status === 401) {
+          handleLogout();
+          return;
+        }
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => null);
+          throw new Error(errorData?.detail || `RAG error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        assistantResponse = data.answer || "I couldn't find an answer in the document.";
+
+        // If backend returned pre-synthesized TTS audio, play it directly
+        if (voiceEnabledRef.current && data.audio) {
+          playAudioBase64(data.audio);
+        } else if (voiceEnabledRef.current && context) {
+          void speakText(assistantResponse);
+        }
+      } else {
+        // Standard Chat
+        const response = await fetch(`${API_URL}/api/chat`, {
+          method: "POST",
+          headers: getAuthHeaders(true),
+          body: JSON.stringify({
+            message: text,
+            history: conversationHistory,
+          }),
+        });
+
+        if (response.status === 401) {
+          handleLogout();
+          return;
+        }
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => null);
+          throw new Error(errorData?.detail || `Chat error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        assistantResponse =
+          data.response || "I couldn't generate a response.";
+
+        if (voiceEnabledRef.current && context) {
+          void speakText(assistantResponse);
+        }
       }
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => null);
-        throw new Error(errorData?.detail || `Chat error: ${response.status}`);
-      }
-
-      const data = await response.json();
-
-      const assistantResponse =
-        data.response || "I couldn't generate a response.";
 
       setMessages((previous) => [
         ...previous,
@@ -546,10 +662,6 @@ function Chat() {
           content: assistantResponse,
         },
       ]);
-
-      if (voiceEnabledRef.current && context) {
-        void speakText(assistantResponse);
-      }
     } catch (err) {
       console.error("Chat error:", err);
 
@@ -2120,14 +2232,64 @@ function Chat() {
             </div>
           )}
 
+          {/* Active RAG Document Pill */}
+          {activeDoc && (
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "8px",
+                background: "#eff6ff",
+                border: "1px solid #bfdbfe",
+                borderRadius: "20px",
+                padding: "4px 12px",
+                fontSize: "12px",
+                fontWeight: 600,
+                color: "#1d4ed8",
+                marginBottom: "6px",
+                alignSelf: "flex-start",
+              }}
+            >
+              <span>📄 {activeDoc.filename} ({activeDoc.chunks} chunks indexed)</span>
+              <button
+                onClick={() => setActiveDoc(null)}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  cursor: "pointer",
+                  color: "#64748b",
+                  padding: "0 2px",
+                  fontSize: "14px",
+                  lineHeight: 1,
+                }}
+                title="Remove document context"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
           <div className="aura-input-wrap">
+            {/* Hidden Document File Picker */}
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleFileUpload}
+              accept=".pdf,.docx"
+              style={{ display: "none" }}
+            />
+
             <button
               className="aura-control voice"
-              onClick={handleNewChat}
-              disabled={loading}
-              title="New conversation"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={loading || isUploadingDoc}
+              title="Upload PDF or DOCX for Document RAG"
             >
-              <Plus size={18} />
+              {isUploadingDoc ? (
+                <span style={{ fontSize: "13px" }}>⏳</span>
+              ) : (
+                <Plus size={18} />
+              )}
             </button>
 
             <input
@@ -2140,7 +2302,11 @@ function Chat() {
                   void handleSend();
                 }
               }}
-              placeholder="Ask anything, or tell AURA what's on your mind..."
+              placeholder={
+                activeDoc
+                  ? `Ask anything about ${activeDoc.filename}...`
+                  : "Ask anything, or tell AURA what's on your mind..."
+              }
               disabled={loading || questionCount >= MAX_QUESTIONS}
             />
 
