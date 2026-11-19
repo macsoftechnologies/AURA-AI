@@ -19,6 +19,9 @@ from app.services.tts.sarvam_tts_service import generate_speech
 
 router = APIRouter(prefix="/api/rag", tags=["Document RAG"])
 
+# Strict 25 MB document upload limit
+MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024
+
 
 class URLIngestRequest(BaseModel):
     url: str
@@ -26,7 +29,8 @@ class URLIngestRequest(BaseModel):
 
 class RAGQueryRequest(BaseModel):
     query: str
-    document_id: int | None = None
+    document_ids: list[int] = []  # Supports 1 or 2 PDFs simultaneously
+    document_id: int | None = None  # Backward compatibility
     language_code: str = "hi-IN"
     with_voice: bool = True
 
@@ -38,8 +42,16 @@ async def upload_document(
     current_user: User = Depends(get_current_user),
 ):
     contents = await file.read()
-    filename = file.filename.lower()
+    file_size = len(contents)
 
+    # 1. Enforce 25 MB Limit
+    if file_size > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum allowed size is 25 MB (uploaded: {file_size / (1024 * 1024):.1f} MB)."
+        )
+
+    filename = file.filename.lower()
     if filename.endswith(".pdf"):
         pages = extract_text_from_pdf(contents)
         doc_type = "pdf"
@@ -53,12 +65,12 @@ async def upload_document(
     if not chunks:
         raise HTTPException(status_code=400, detail="Could not extract text from document.")
 
-    # 1. Save Document Record
+    # 2. Save Document Record
     user_doc = UserDocument(
         user_id=current_user.id,
         filename=file.filename,
         doc_type=doc_type,
-        file_size_bytes=len(contents),
+        file_size_bytes=file_size,
         total_pages=len(pages),
         chunk_count=len(chunks),
     )
@@ -66,11 +78,11 @@ async def upload_document(
     db.commit()
     db.refresh(user_doc)
 
-    # 2. FastEmbed Multilingual ONNX Embeddings
+    # 3. FastEmbed Multilingual ONNX Embeddings (Batched in 32s for low RAM)
     texts = [c["chunk_text"] for c in chunks]
-    vectors = embed_documents(texts)
+    vectors = embed_documents(texts, batch_size=32)
 
-    # 3. Insert Chunks with tsvector
+    # 4. Insert Chunks with tsvector
     for c, vec in zip(chunks, vectors):
         chunk_obj = DocumentChunk(
             document_id=user_doc.id,
@@ -91,7 +103,12 @@ async def upload_document(
     """), {"doc_id": user_doc.id})
     db.commit()
 
-    return {"status": "success", "document_id": user_doc.id, "chunks_indexed": len(chunks)}
+    return {
+        "status": "success",
+        "document_id": user_doc.id,
+        "filename": user_doc.filename,
+        "chunks_indexed": len(chunks)
+    }
 
 
 @router.post("/url")
@@ -122,7 +139,7 @@ async def ingest_url(
     db.refresh(user_doc)
 
     texts = [c["chunk_text"] for c in chunks]
-    vectors = embed_documents(texts)
+    vectors = embed_documents(texts, batch_size=32)
 
     for c, vec in zip(chunks, vectors):
         chunk_obj = DocumentChunk(
@@ -143,7 +160,12 @@ async def ingest_url(
     """), {"doc_id": user_doc.id})
     db.commit()
 
-    return {"status": "success", "document_id": user_doc.id, "chunks_indexed": len(chunks)}
+    return {
+        "status": "success",
+        "document_id": user_doc.id,
+        "filename": user_doc.filename,
+        "chunks_indexed": len(chunks)
+    }
 
 
 @router.get("/documents")
@@ -186,17 +208,21 @@ async def query_rag(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # 1. Check Redis Cache (<50ms)
-    cached = get_rag_cache(current_user.id, req.query, req.language_code)
+    # Resolve target document IDs (support both array or single ID)
+    target_doc_ids = req.document_ids or ([] if req.document_id is None else [req.document_id])
+
+    # 1. Check Redis Cache
+    cache_key_suffix = f"{req.query}:{'-'.join(map(str, sorted(target_doc_ids)))}"
+    cached = get_rag_cache(current_user.id, cache_key_suffix, req.language_code)
     if cached:
         return cached
 
-    # 2. Hybrid Retrieval + FlashRank Rerank
+    # 2. Hybrid Retrieval + FlashRank Rerank across active documents
     top_chunks = await hybrid_search_and_rerank(
         db=db,
         user_id=current_user.id,
         query=req.query,
-        doc_id=req.document_id,
+        doc_ids=target_doc_ids if target_doc_ids else None,
         top_n=4,
     )
 
@@ -207,13 +233,15 @@ async def query_rag(
             "audio": None,
         }
 
+    # Context clearly identifies which document each snippet came from
     context_str = "\n\n".join(
-        [f"[Page {c['page_number']}]: {c['chunk_text']}" for c in top_chunks]
+        [f"[Document: {c.get('filename', 'Doc')}, Page {c['page_number']}]: {c['chunk_text']}" for c in top_chunks]
     )
 
     grounded_prompt = f"""Use the following document context to answer the user's question accurately.
+If comparing multiple documents, highlight the similarities or differences based on the context.
 If the answer cannot be found in the context, clearly state that.
-Mention the page number where the information was found.
+Mention the document name and page number where the information was found.
 Keep the answer concise (2-4 sentences) so it sounds natural when spoken aloud.
 
 DOCUMENT CONTEXT:
@@ -241,13 +269,17 @@ USER QUESTION: {req.query}"""
     response_payload = {
         "answer": answer,
         "citations": [
-            {"page": c["page_number"], "snippet": c["chunk_text"][:140] + "..."}
+            {
+                "document": c.get("filename", "Document"),
+                "page": c["page_number"],
+                "snippet": c["chunk_text"][:140] + "..."
+            }
             for c in top_chunks
         ],
         "audio": audio_base64,
     }
 
     # 5. Cache result
-    set_rag_cache(current_user.id, req.query, req.language_code, response_payload)
+    set_rag_cache(current_user.id, cache_key_suffix, req.language_code, response_payload)
 
     return response_payload

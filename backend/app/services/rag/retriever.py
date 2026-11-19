@@ -18,13 +18,14 @@ def _score_and_rank_candidates(query_vector: list[float], rows: list) -> list[di
     """Helper running inside worker thread to prevent event loop blocking."""
     scored = []
     for r in rows:
-        chunk_id, chunk_text, page_number, document_id, embedding = r
+        chunk_id, chunk_text, page_number, document_id, filename, embedding = r
         sim = cosine_similarity(query_vector, embedding) if embedding else 0.0
         scored.append({
             "id": chunk_id,
             "chunk_text": chunk_text,
             "page_number": page_number,
             "document_id": document_id,
+            "filename": filename,
             "semantic_score": sim,
         })
     scored.sort(key=lambda x: x["semantic_score"], reverse=True)
@@ -35,25 +36,29 @@ async def hybrid_search_and_rerank(
     db,
     user_id: int,
     query: str,
-    doc_id: int | None = None,
-    candidate_pool: int = 15,
+    doc_ids: list[int] | None = None,
+    candidate_pool: int = 20,
     top_n: int = 4,
 ) -> list[dict]:
     # 1. Non-blocking ONNX embedding in thread pool
     query_vector = await asyncio.to_thread(embed_query, query)
-    doc_filter = "AND document_id = :doc_id" if doc_id else ""
-
-    # 2. Query candidates from PostgreSQL
-    sql = f"""
-    SELECT id, chunk_text, page_number, document_id, embedding
-    FROM document_chunks
-    WHERE user_id = :user_id {doc_filter}
-    LIMIT 200;
-    """
-
+    
+    # Filter across 1 or 2 documents if provided
+    doc_filter = ""
     params = {"user_id": user_id}
-    if doc_id:
-        params["doc_id"] = doc_id
+
+    if doc_ids and len(doc_ids) > 0:
+        doc_filter = "AND dc.document_id = ANY(:doc_ids)"
+        params["doc_ids"] = doc_ids
+
+    # 2. Query candidates from PostgreSQL joined with user_documents to get filename
+    sql = f"""
+    SELECT dc.id, dc.chunk_text, dc.page_number, dc.document_id, ud.filename, dc.embedding
+    FROM document_chunks dc
+    JOIN user_documents ud ON dc.document_id = ud.id
+    WHERE dc.user_id = :user_id {doc_filter}
+    LIMIT 300;
+    """
 
     rows = db.execute(text(sql), params).fetchall()
     if not rows:

@@ -7,10 +7,14 @@ _embed_model = TextEmbedding(
     threads=2
 )
 
-def embed_documents(texts: List[str]) -> List[List[float]]:
-    """Generates 384-dimensional dense vectors for document chunks."""
-    embeddings = list(_embed_model.embed(texts))
-    return [e.tolist() for e in embeddings]
+def embed_documents(texts: List[str], batch_size: int = 32) -> List[List[float]]:
+    """Generates 384-dimensional dense vectors in memory-safe batches of 32."""
+    all_embeddings = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i : i + batch_size]
+        batch_embeddings = list(_embed_model.embed(batch))
+        all_embeddings.extend([e.tolist() for e in batch_embeddings])
+    return all_embeddings
 
 def embed_query(text: str) -> List[float]:
     """Generates 384-dimensional dense vector for a user query."""

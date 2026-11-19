@@ -189,7 +189,7 @@ function Chat() {
   const [speechError, setSpeechError] = useState("");
   const recognitionRef = useRef<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [activeDoc, setActiveDoc] = useState<{ id: number; filename: string; chunks: number } | null>(null);
+  const [activeDocs, setActiveDocs] = useState<Array<{ id: number; filename: string; chunks: number }>>([]);
   const [isUploadingDoc, setIsUploadingDoc] = useState(false);
   const [isVoiceEnabled, setIsVoiceEnabled] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -237,6 +237,19 @@ function Chat() {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    if (activeDocs.length >= 2) {
+      setError("You can attach a maximum of 2 documents at a time for comparison.");
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
+    // Client-side 25 MB guard
+    if (file.size > 25 * 1024 * 1024) {
+      setError(`File is too large. Maximum size is 25 MB (your file: ${(file.size / (1024 * 1024)).toFixed(1)} MB).`);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) return;
 
@@ -261,11 +274,14 @@ function Chat() {
       }
 
       const data = await res.json();
-      setActiveDoc({
-        id: data.document_id,
-        filename: file.name,
-        chunks: data.chunks_indexed,
-      });
+      setActiveDocs((prev) => [
+        ...prev,
+        {
+          id: data.document_id,
+          filename: data.filename || file.name,
+          chunks: data.chunks_indexed,
+        },
+      ]);
     } catch (err: any) {
       setError(err.message || "Failed to process document");
     } finally {
@@ -273,6 +289,8 @@ function Chat() {
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }
+
+
 
   function handleLogout() {
     clearSilenceTimer();
@@ -593,14 +611,14 @@ function Chat() {
     try {
       let assistantResponse = "";
 
-      if (activeDoc) {
-        // Grounded Multilingual Hybrid RAG Query
+      if (activeDocs.length > 0) {
+        // Grounded Multilingual Hybrid RAG Query across 1 or 2 PDFs
         const response = await fetch(`${API_URL}/api/rag/query`, {
           method: "POST",
           headers: getAuthHeaders(true),
           body: JSON.stringify({
             query: text,
-            document_id: activeDoc.id,
+            document_ids: activeDocs.map((d) => d.id),
             language_code: selectedLang.code,
             with_voice: true,
           }),
@@ -2232,40 +2250,51 @@ function Chat() {
             </div>
           )}
 
-          {/* Active RAG Document Pill */}
-          {activeDoc && (
+          {/* Active RAG Document Badges (Up to 2 PDFs) */}
+          {activeDocs.length > 0 && (
             <div
               style={{
-                display: "inline-flex",
-                alignItems: "center",
+                display: "flex",
                 gap: "8px",
-                background: "#eff6ff",
-                border: "1px solid #bfdbfe",
-                borderRadius: "20px",
-                padding: "4px 12px",
-                fontSize: "12px",
-                fontWeight: 600,
-                color: "#1d4ed8",
-                marginBottom: "6px",
+                flexWrap: "wrap",
+                marginBottom: "8px",
                 alignSelf: "flex-start",
               }}
             >
-              <span>📄 {activeDoc.filename} ({activeDoc.chunks} chunks indexed)</span>
-              <button
-                onClick={() => setActiveDoc(null)}
-                style={{
-                  background: "transparent",
-                  border: "none",
-                  cursor: "pointer",
-                  color: "#64748b",
-                  padding: "0 2px",
-                  fontSize: "14px",
-                  lineHeight: 1,
-                }}
-                title="Remove document context"
-              >
-                ✕
-              </button>
+              {activeDocs.map((doc) => (
+                <div
+                  key={doc.id}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    background: "#eff6ff",
+                    border: "1px solid #bfdbfe",
+                    borderRadius: "20px",
+                    padding: "4px 12px",
+                    fontSize: "12px",
+                    fontWeight: 600,
+                    color: "#1d4ed8",
+                  }}
+                >
+                  <span>📄 {doc.filename} ({doc.chunks} chunks)</span>
+                  <button
+                    onClick={() => setActiveDocs((prev) => prev.filter((d) => d.id !== doc.id))}
+                    style={{
+                      background: "transparent",
+                      border: "none",
+                      cursor: "pointer",
+                      color: "#64748b",
+                      padding: "0 2px",
+                      fontSize: "14px",
+                      lineHeight: 1,
+                    }}
+                    title="Remove document"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
             </div>
           )}
 
@@ -2282,8 +2311,12 @@ function Chat() {
             <button
               className="aura-control voice"
               onClick={() => fileInputRef.current?.click()}
-              disabled={loading || isUploadingDoc}
-              title="Upload PDF or DOCX for Document RAG"
+              disabled={loading || isUploadingDoc || activeDocs.length >= 2}
+              title={
+                activeDocs.length >= 2
+                  ? "Maximum 2 documents attached"
+                  : "Upload PDF or DOCX (up to 25 MB)"
+              }
             >
               {isUploadingDoc ? (
                 <span style={{ fontSize: "13px" }}>⏳</span>
@@ -2303,8 +2336,10 @@ function Chat() {
                 }
               }}
               placeholder={
-                activeDoc
-                  ? `Ask anything about ${activeDoc.filename}...`
+                activeDocs.length === 2
+                  ? `Ask anything comparing ${activeDocs[0].filename} and ${activeDocs[1].filename}...`
+                  : activeDocs.length === 1
+                  ? `Ask anything about ${activeDocs[0].filename}...`
                   : "Ask anything, or tell AURA what's on your mind..."
               }
               disabled={loading || questionCount >= MAX_QUESTIONS}
