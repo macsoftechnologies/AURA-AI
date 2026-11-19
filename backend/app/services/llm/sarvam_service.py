@@ -4,6 +4,18 @@ from app.core.config import SARVAM_API_KEY, SARVAM_BASE_URL, SARVAM_LLM_MODEL
 
 logger = logging.getLogger(__name__)
 
+# Shared HTTP connection pool for high concurrency (10+ users)
+_client: httpx.AsyncClient | None = None
+
+def get_sarvam_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, connect=10.0),
+            limits=httpx.Limits(max_connections=40, max_keepalive_connections=20)
+        )
+    return _client
+
 SYSTEM_PROMPT = """
 You are AURA, an intelligent, warm, and natural conversational voice AI assistant.
 
@@ -31,7 +43,6 @@ async def generate_response(message: str, history: list = None, language: str = 
         "Content-Type": "application/json",
     }
 
-    # Ensure model is a valid active Sarvam model
     model = SARVAM_LLM_MODEL
     if model in ("sarvam-30b", "sarvam-2b", "openai/gpt-oss-120b"):
         model = "sarvam-105b-conversations"
@@ -43,33 +54,32 @@ async def generate_response(message: str, history: list = None, language: str = 
         "max_tokens": 450,
     }
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
+    client = get_sarvam_client()
+    try:
+        response = await client.post(
+            f"{SARVAM_BASE_URL}/v1/chat/completions",
+            json=payload,
+            headers=headers
+        )
+    except Exception as e:
+        logger.error(f"Failed to connect to Sarvam API: {e}")
+        raise
+
+    if response.status_code != 200:
+        logger.error(f"Sarvam LLM Error {response.status_code}: {response.text}")
+        if response.status_code in (400, 404) and payload["model"] != "sarvam-105b":
+            logger.info("Retrying with fallback model sarvam-105b...")
+            payload["model"] = "sarvam-105b"
             response = await client.post(
                 f"{SARVAM_BASE_URL}/v1/chat/completions",
                 json=payload,
                 headers=headers
             )
-        except Exception as e:
-            logger.error(f"Failed to connect to Sarvam API: {e}")
-            raise
-
-        if response.status_code != 200:
-            logger.error(f"Sarvam LLM Error {response.status_code}: {response.text}")
-            # Try fallback to sarvam-105b if model was rejected
-            if response.status_code in (400, 404) and payload["model"] != "sarvam-105b":
-                logger.info("Retrying with fallback model sarvam-105b...")
-                payload["model"] = "sarvam-105b"
-                response = await client.post(
-                    f"{SARVAM_BASE_URL}/v1/chat/completions",
-                    json=payload,
-                    headers=headers
-                )
-                if response.status_code != 200:
-                    logger.error(f"Fallback Sarvam LLM Error {response.status_code}: {response.text}")
-                    response.raise_for_status()
-            else:
+            if response.status_code != 200:
+                logger.error(f"Fallback Sarvam LLM Error {response.status_code}: {response.text}")
                 response.raise_for_status()
+        else:
+            response.raise_for_status()
 
-        data = response.json()
-        return data["choices"][0]["message"]["content"]
+    data = response.json()
+    return data["choices"][0]["message"]["content"]
